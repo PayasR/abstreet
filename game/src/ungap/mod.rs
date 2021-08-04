@@ -95,7 +95,7 @@ impl State<App> for ExploreMap {
                     return Transition::Push(PopupMsg::new_state(ctx, "TODO", vec!["TODO"]));
                 }
                 "Edit network" => {
-                    return Transition::Push(edit::SelectRoute::new_state(ctx, app));
+                    return Transition::Push(edit::SketchRoute::new_state(ctx, app));
                 }
                 _ => unreachable!(),
             }

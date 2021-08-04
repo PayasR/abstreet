@@ -1,61 +1,148 @@
-use geom::{Distance, FindClosest};
+use geom::{Circle, Distance, FindClosest};
 use map_model::{IntersectionID, RoadID};
 use widgetry::{
     Color, Drawable, EventCtx, GeomBatch, GfxCtx, HorizontalAlignment, Key, Line, Outcome, Panel,
-    RewriteColor, State, TextExt, Toggle, VerticalAlignment, Widget,
+    State, TextExt, Toggle, VerticalAlignment, Widget,
 };
 
 use crate::app::{App, Transition};
 
 // A new attempt at RoadSelector.
-pub struct DraggyRoute {
+pub struct SketchRoute {
     top_panel: Panel,
     snap_to_intersections: FindClosest<IntersectionID>,
-    i1: Option<IntersectionID>,
-    hovering: Option<IntersectionID>,
-    // TODO Cache based on i1 and i2? (path, draw)
-    preview: (Vec<RoadID>, Drawable),
+    // TODO Explicit waypoints and implicit stuff in between.
+    path: Vec<IntersectionID>,
+    mode: Mode,
+    preview: Drawable,
 }
 
-impl DraggyRoute {
+#[derive(Clone, PartialEq)]
+enum Mode {
+    Neutral,
+    Hovering(IntersectionID),
+    Dragging { idx: usize, at: IntersectionID },
+}
+
+impl SketchRoute {
     pub fn new_state(ctx: &mut EventCtx, app: &mut App) -> Box<dyn State<App>> {
         let mut snap_to_intersections = FindClosest::new(app.primary.map.get_bounds());
         for i in app.primary.map.all_intersections() {
             snap_to_intersections.add(i.id, i.polygon.points());
         }
 
-        Box::new(DraggyRoute {
+        Box::new(SketchRoute {
             top_panel: make_top_panel(ctx),
             snap_to_intersections,
-            i1: None,
-            hovering: None,
-            preview: (Vec::new(), Drawable::empty(ctx)),
+            path: Vec::new(),
+            mode: Mode::Neutral,
+            preview: Drawable::empty(ctx),
         })
+    }
+
+    fn update_mode(&mut self, ctx: &mut EventCtx, app: &App) {
+        let map = &app.primary.map;
+
+        match self.mode {
+            Mode::Neutral => {
+                ctx.canvas_movement();
+                if ctx.redo_mouseover() {
+                    if let Some(i) = ctx.canvas.get_cursor_in_map_space().and_then(|pt| {
+                        self.snap_to_intersections
+                            .closest_pt(pt, Distance::meters(50.0))
+                            .map(|pair| pair.0)
+                    }) {
+                        self.mode = Mode::Hovering(i);
+                    }
+                }
+            }
+            Mode::Hovering(i) => {
+                if ctx.normal_left_click() {
+                    if self.path.is_empty() {
+                        self.path.push(i);
+                    } else if self.path.contains(&i) {
+                        // Ignore. They can drag this point, though.
+                    } else if let Some(new_path) =
+                        map.simple_path_btwn(*self.path.last().unwrap(), i)
+                    {
+                        self.path.pop();
+                        // TODO This will mess up the path for sure
+                        for r in new_path {
+                            let r = map.get_r(r);
+                            self.path.push(r.src_i);
+                            self.path.push(r.dst_i);
+                        }
+                    }
+                    return;
+                }
+
+                if ctx.input.left_mouse_button_pressed() {
+                    if let Some(idx) = self.path.iter().position(|x| *x == i) {
+                        self.mode = Mode::Dragging { idx, at: i };
+                        return;
+                    }
+                }
+
+                if ctx.redo_mouseover() {
+                    if let Some(i) = ctx.canvas.get_cursor_in_map_space().and_then(|pt| {
+                        self.snap_to_intersections
+                            .closest_pt(pt, Distance::meters(50.0))
+                            .map(|pair| pair.0)
+                    }) {
+                        self.mode = Mode::Hovering(i);
+                    } else {
+                        self.mode = Mode::Neutral;
+                    }
+                }
+            }
+            Mode::Dragging { idx, at } => {
+                if ctx.input.left_mouse_button_released() {
+                    self.mode = Mode::Hovering(at);
+                    return;
+                }
+
+                if ctx.redo_mouseover() {
+                    if let Some(i) = ctx.canvas.get_cursor_in_map_space().and_then(|pt| {
+                        self.snap_to_intersections
+                            .closest_pt(pt, Distance::meters(50.0))
+                            .map(|pair| pair.0)
+                    }) {
+                        if i != at {
+                            // Modify the path!
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn update_preview(&mut self, ctx: &mut EventCtx, app: &App) {
+        let mut batch = GeomBatch::new();
+        let map = &app.primary.map;
+
+        for i in &self.path {
+            batch.push(
+                Color::RED,
+                Circle::new(map.get_i(*i).polygon.center(), Distance::meters(10.0))
+                    .to_outline(Distance::meters(2.0))
+                    .unwrap(),
+            );
+        }
+
+        // TODO Mode
+
+        self.preview = batch.upload(ctx);
     }
 }
 
-impl State<App> for DraggyRoute {
+impl State<App> for SketchRoute {
     fn event(&mut self, ctx: &mut EventCtx, app: &mut App) -> Transition {
-        ctx.canvas_movement();
-
-        if ctx.redo_mouseover() {
-            let new_hovering = ctx.canvas.get_cursor_in_map_space().and_then(|pt| {
-                self.snap_to_intersections
-                    .closest_pt(pt, Distance::meters(50.0))
-                    .map(|pair| pair.0)
-            });
-            if new_hovering != self.hovering {
-                self.preview = make_preview(ctx, app, new_hovering, self.i1);
-                self.hovering = new_hovering;
-            }
-
-            // TODO Drag the first marker, or the second once it's placed.
+        let orig_path = self.path.clone();
+        let orig_mode = self.mode.clone();
+        self.update_mode(ctx, app);
+        if self.path != orig_path || self.mode != orig_mode {
+            self.update_preview(ctx, app);
         }
-        if self.i1.is_none() && self.hovering.is_some() && ctx.normal_left_click() {
-            self.i1 = self.hovering;
-            self.preview = make_preview(ctx, app, self.hovering, self.i1);
-        }
-        // TODO Confirm path
 
         if let Outcome::Clicked(x) = self.top_panel.event(ctx) {
             match x.as_ref() {
@@ -72,7 +159,7 @@ impl State<App> for DraggyRoute {
     fn draw(&self, g: &mut GfxCtx, _: &App) {
         // TODO Still draw the layer
         self.top_panel.draw(g);
-        g.redraw(&self.preview.1);
+        g.redraw(&self.preview);
     }
 }
 
@@ -98,47 +185,4 @@ fn make_top_panel(ctx: &mut EventCtx) -> Panel {
     ]))
     .aligned(HorizontalAlignment::Center, VerticalAlignment::Top)
     .build(ctx)
-}
-
-fn make_preview(
-    ctx: &mut EventCtx,
-    app: &App,
-    hovering: Option<IntersectionID>,
-    i1: Option<IntersectionID>,
-) -> (Vec<RoadID>, Drawable) {
-    let mut batch = GeomBatch::new();
-    let mut path = Vec::new();
-    let map = &app.primary.map;
-
-    if let Some(i1) = i1 {
-        batch.append(
-            GeomBatch::load_svg(ctx, "system/assets/timeline/start_pos.svg")
-                .centered_on(map.get_i(i1).polygon.center()),
-        );
-
-        if let Some(i2) = hovering {
-            if i1 != i2 {
-                batch.append(
-                    GeomBatch::load_svg(ctx, "system/assets/timeline/goal_pos.svg")
-                        .centered_on(map.get_i(i2).polygon.center())
-                        .color(RewriteColor::ChangeAlpha(0.8)),
-                );
-
-                if let Some(roads) = map.simple_path_btwn(i1, i2) {
-                    for r in roads {
-                        path.push(r);
-                        batch.push(Color::RED.alpha(0.8), map.get_r(r).get_thick_polygon(map));
-                    }
-                }
-            }
-        }
-    } else if let Some(i1) = hovering {
-        batch.append(
-            GeomBatch::load_svg(ctx, "system/assets/timeline/start_pos.svg")
-                .centered_on(map.get_i(i1).polygon.center())
-                .color(RewriteColor::ChangeAlpha(0.8)),
-        );
-    }
-
-    (path, batch.upload(ctx))
 }
