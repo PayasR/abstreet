@@ -721,8 +721,13 @@ impl Map {
         &self.config
     }
 
-    /// Simple search along undirected roads
-    pub fn simple_path_btwn(&self, i1: IntersectionID, i2: IntersectionID) -> Option<Vec<RoadID>> {
+    /// Simple search along undirected roads. Expresses the result as a sequence of roads and a
+    /// sequence of intersections.
+    pub fn simple_path_btwn(
+        &self,
+        i1: IntersectionID,
+        i2: IntersectionID,
+    ) -> Option<(Vec<RoadID>, Vec<IntersectionID>)> {
         let mut graph: UnGraphMap<IntersectionID, RoadID> = UnGraphMap::new();
         for r in self.all_roads() {
             if !r.is_light_rail() {
@@ -736,11 +741,11 @@ impl Map {
             |(_, _, r)| self.get_r(*r).center_pts.length(),
             |_| Distance::ZERO,
         )?;
-        Some(
-            path.windows(2)
-                .map(|pair| *graph.edge_weight(pair[0], pair[1]).unwrap())
-                .collect(),
-        )
+        let roads: Vec<RoadID> = path
+            .windows(2)
+            .map(|pair| *graph.edge_weight(pair[0], pair[1]).unwrap())
+            .collect();
+        Some((roads, path))
     }
 
     /// Returns the routing params baked into the map.
